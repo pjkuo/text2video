@@ -4824,50 +4824,159 @@ function parseAIResponse(txt) {
   return null;
 }
 
+// ============================================================
+// 素材重點萃取 (使用者上傳/輸入為最優先參考來源)
+// ============================================================
+function _vsClean(t){return (t||'').split('\n').map(function(x){return x.replace(/^[\s\-\*•·◦▪‣◆●○\u3000>]+/,'').trim();}).filter(Boolean);}
+function _vsItems(t){return (t||'').split(/[、,，;；\/\n]|\s-\s/).map(function(x){return x.trim();}).filter(function(x){return x.length>1;});}
+function _vsMarker(text,names){for(var i=0;i<names.length;i++){var m=text.match(new RegExp('【\\s*'+names[i]+'\\s*】([\\s\\S]*?)(?=【|$)'));if(m&&m[1].trim())return m[1].trim();}return '';}
+function _vsByKw(lines,kws){var out=[];lines.forEach(function(l){if(kws.some(function(k){return l.indexOf(k)>=0;}))out.push(l.replace(/^[^:：]*[:：]/,'').trim()||l);});return out;}
+function _vsUniq(a){return a.filter(function(v,i){return v&&a.indexOf(v)===i;});}
+
+function extractMind(mind,domain){
+  var r={central:'',problems:[],techs:[],benefits:[],apps:[]};
+  if(!mind) return r;
+  r.central=_vsMarker(mind,['中心主題','主題','中心']);
+  var pr=_vsMarker(mind,['問題定義','問題','痛點','挑戰']);
+  var te=_vsMarker(mind,['技術導入','技術','方法','解決方案']);
+  var be=_vsMarker(mind,['效益分析','效益','成效','成果']);
+  var ap=_vsMarker(mind,['應用','場景','情境']);
+  if(pr) r.problems=_vsItems(pr);
+  if(te) r.techs=_vsItems(te);
+  if(be) r.benefits=_vsItems(be);
+  if(ap) r.apps=_vsItems(ap);
+  // 收集其他 【標題】 當作要點/應用 (排除已知四大區)
+  var known=['中心主題','主題','中心','問題定義','問題','痛點','挑戰','技術導入','技術','方法','解決方案','效益分析','效益','成效','成果','應用','場景','情境','專題大綱(自簡報萃取)'];
+  var tm,re2=/【([^】]+)】/g;
+  while((tm=re2.exec(mind))){var name=tm[1].trim();if(known.indexOf(name)<0&&name.length<=30) r.apps.push(name);}
+  // free-form fallback
+  var lines=_vsClean(mind).filter(function(l){return !/^【[^】]*】$/.test(l);});
+  if(!r.central){var h=lines.find(function(l){return l.length<=30;});r.central=((h||lines[0]||(domain+'專題'))+'').replace(/[#＃]+/g,'').trim();}
+  if(!r.problems.length) r.problems=_vsByKw(lines,['問題','痛點','挑戰','困難','耗時','浪費','成本','難','低落','瓶頸']);
+  if(!r.techs.length) r.techs=_vsByKw(lines,['技術','方法','AI','IoT','演算','模型','感測','分析','系統','學習','API','自動','偵測']);
+  if(!r.benefits.length) r.benefits=_vsByKw(lines,['效益','提升','降低','節省','減少','成效','加速','%','倍','準確']);
+  if(!r.apps.length) r.apps=_vsByKw(lines,['應用','場景','情境','案例','使用者','課堂','現場','推播']);
+  r.problems=_vsUniq(r.problems);r.techs=_vsUniq(r.techs);r.benefits=_vsUniq(r.benefits);r.apps=_vsUniq(r.apps);
+  return r;
+}
+function extractIPO(ipo){
+  var r={inputs:[],process:[],outputs:[]};
+  if(!ipo) return r;
+  function grab(kws){var m=ipo.match(new RegExp('(?:'+kws.join('|')+')\\s*(?:\\([A-Za-z]+\\))?\\s*[:：]?\\s*([^\\n]*)','i'));return m?_vsItems(m[1]):[];}
+  r.inputs=grab(['輸入','Input']);r.process=grab(['處理','Process','流程']);r.outputs=grab(['輸出','Output','結果']);
+  return r;
+}
+function extractCode(code){
+  var r={funcs:[],ops:[]};
+  if(!code) return r;
+  var fn=[],m,re1=/(?:def|function)\s+([A-Za-z_]\w*)/g;while((m=re1.exec(code)))fn.push(m[1]);
+  var cl=[],re3=/class\s+([A-Za-z_]\w*)/g;while((m=re3.exec(code)))cl.push(m[1]);
+  r.funcs=_vsUniq(cl.concat(fn)).slice(0,6);
+  var hints=[['np.fft','FFT 頻譜分析'],['fft','頻譜分析'],['predict','模型預測'],['train','模型訓練'],['collab','協同過濾'],['tfidf','TF-IDF 內容分析'],['anomaly','異常偵測'],['z =','Z-score 異常偵測'],['cox','存活分析'],['recommend','智慧推薦'],['encode','特徵編碼'],['activate','自動控制連動'],['irrigation','自動灌溉'],['vent','自動通風'],['detect','偵測判斷'],['rank','排序推薦']];
+  var low=code.toLowerCase(),ops=[];hints.forEach(function(h){if(low.indexOf(h[0].toLowerCase())>=0)ops.push(h[1]);});
+  r.ops=_vsUniq(ops).slice(0,4);
+  return r;
+}
+function extractPPTX(pptx){
+  var pts=[];if(!pptx) return pts;
+  _vsClean(pptx).forEach(function(l){
+    l=l.replace(/^#+\s*/,'').replace(/^Slide\s*\d+\s*[:：-]?\s*/i,'').replace(/^第\s*[\d一二三四五六七八九十]+\s*[頁張]\s*[:：-]?\s*/,'').trim();
+    if(l&&l.length>1&&!/^【[^】]*】$/.test(l)) pts.push(l);
+  });
+  return _vsUniq(pts);
+}
+function extractSource(config){
+  var domain=config.領域||'';
+  var m=extractMind(config.心智圖,domain);
+  var ipo=extractIPO(config.IPO架構);
+  var code=extractCode(config.程式碼);
+  var slides=extractPPTX(config.簡報投影片);
+  function _flat(a){var o=[];a.forEach(function(x){String(x).split('、').forEach(function(y){y=y.trim();if(y)o.push(y);});});return _vsUniq(o);}
+  var central=m.central||slides[0]||(domain+'專題');
+  var notCentral=function(x){return x!==central;};
+  var techs=_flat(m.techs.concat(ipo.process).concat(code.ops)).filter(notCentral);
+  var apps=_flat(m.apps.concat(slides.slice(0,3))).filter(notCentral);
+  var hasUser=!!(config.心智圖||config.IPO架構||config.程式碼||config.簡報投影片);
+  return {domain:domain,central:central,problems:_flat(m.problems),techs:techs,benefits:_flat(m.benefits),apps:apps,inputs:_flat(ipo.inputs),process:_flat(ipo.process),outputs:_flat(ipo.outputs),code:code,slides:slides,hasUser:hasUser};
+}
+
+var EN_DOMAIN={'農業':'a smart-agriculture greenhouse','工業':'a smart factory floor','資訊':'a campus / information-system setting','生醫':'a biomedical research lab','商管':'a modern e-commerce / business setting','環境':'an environmental-monitoring field site'};
+function enDomain(d){return EN_DOMAIN[d]||('a '+(d||'')+' setting');}
+var EN_TERM={'物聯網':'IoT','IoT':'IoT','溫濕度':'temperature & humidity sensing','光照':'light sensing','土壤':'soil-moisture sensing','機器學習':'machine learning','深度學習':'deep learning','生長模型':'growth-prediction model','灑水':'automated irrigation','控溫':'climate control','通風':'ventilation control','補光':'supplemental lighting','異常偵測':'anomaly detection','諧波':'harmonic analysis','FFT':'FFT spectral analysis','頻譜':'spectral analysis','負載':'load monitoring','振動':'vibration sensing','協同過濾':'collaborative filtering','TF-IDF':'TF-IDF analysis','加權混合':'weighted hybrid model','衝堂':'schedule-conflict detection','推薦':'recommendation engine','存活':'survival prediction','基因':'gene-expression analysis','病理':'pathology imaging','個人化':'personalization','行為':'user-behavior tracking','轉換':'conversion prediction','A/B':'A/B testing','水質':'water-quality monitoring','溯源':'pollution-source tracing','預警':'early-warning alerts','Z-score':'Z-score anomaly detection','感測器':'sensors','感測':'sensors','分析':'analytics','預測':'prediction','監測':'monitoring','自動控制':'automated control','控制':'control logic','儀表板':'live dashboard','雲端':'cloud analytics','演算法':'algorithm','模型':'model','系統':'system','推播':'mobile push notifications','LINE':'mobile push','API':'real-time API'};
+var EN_KEYS=Object.keys(EN_TERM).sort(function(a,b){return b.length-a.length;});
+function enTerm(t){ if(!t) return t; var low=(''+t).toLowerCase(); for(var i=0;i<EN_KEYS.length;i++){ if(low.indexOf(EN_KEYS[i].toLowerCase())>=0) return EN_TERM[EN_KEYS[i]]; } return t; }
+function enList(arr,n){ if(!arr||!arr.length) return ''; var seen={},out=[]; for(var i=0;i<arr.length&&out.length<(n||3);i++){ var e=enTerm(arr[i]); if(e&&!seen[e]){seen[e]=1;out.push(e);} } return out.join(', '); }
+
 function generateTemplateScript(config) {
   const len = parseInt(config.時長);
-  const t0 = 0;
-  const t1 = Math.round(len * 0.15);
-  const t2 = Math.round(len * 0.65);
-  const t3 = Math.round(len * 0.90);
-  const t4 = len;
+  const t0=0, t1=Math.round(len*0.15), t2=Math.round(len*0.65), t3=Math.round(len*0.90), t4=len;
   const fmt = s => `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
 
-  const mind = config.心智圖 || '';
-  const central = (mind.match(/【中心主題】(.+?)(?=【|$)/s) || [,config.領域 + '專題'])[1].trim();
-  const problem = (mind.match(/【問題定義】(.+?)(?=【|$)/s) || [,'傳統做法效率低、成本高'])[1].trim();
-  const tech = (mind.match(/【技術導入】(.+?)(?=【|$)/s) || [,'AI + IoT + 資料分析'])[1].trim();
-  const benefit = (mind.match(/【效益分析】(.+?)(?=【|$)/s) || [,'效率提升 80%,成本下降 60%'])[1].trim();
+  const S = extractSource(config);
+  const dom = config.領域;
+  const central = S.central;
+  const join = (a,n) => (a&&a.length ? a.slice(0,n||3).join('、') : '');
 
+  const problems = S.problems.length ? S.problems : ['傳統做法耗時','成本高','難以即時掌握'];
+  const techs    = S.techs.length ? S.techs : ['AI','IoT','資料分析'];
+  const benefits = S.benefits.length ? S.benefits : ['效率提升','成本下降'];
+  const inputs   = S.inputs, process = S.process, outputs = S.outputs;
+  const funcs    = S.code.funcs.slice(0,3);
+  const ops      = S.code.ops.slice(0,3);
+  const appsDistinct = S.apps.filter(function(a){return outputs.indexOf(a)<0;});
+  const audPhrase = config.受眾.includes('老師') ? '讓師生在課堂中即時看到結果與回饋'
+                  : (config.受眾.includes('業界')||config.受眾.includes('企業')) ? '讓第一線人員與決策者同步掌握狀況'
+                  : '讓使用者在現場就能輕鬆操作';
+
+  // ---- 旁白(多句、依素材鋪陳,填滿時長) ----
+  const nQi = `在${dom}的現場，${join(problems,3)}，一直是難以解決的痛點。` +
+              `這些問題每天都在消耗時間、人力與成本。` +
+              `如果有一套方法，能把過去耗時的工作縮短到數秒完成，你會想了解嗎？`;
+
+  let nCheng = `為此，我們打造了「${central}」。`;
+  if (techs.length) nCheng += `系統整合${join(techs,4)}，`;
+  if (inputs.length && process.length) nCheng += `從「${join(inputs,3)}」出發，經過「${join(process,3)}」自動完成分析與運算；`;
+  else if (process.length) nCheng += `透過「${join(process,3)}」自動處理資料；`;
+  else nCheng += `讓資料自己說話、流程全程自動化；`;
+  if (funcs.length) nCheng += `核心以 ${funcs.join('、')} 等程式模組實作${ops.length?`，負責${join(ops,2)}`:''}，把繁瑣的人工步驟變成即時而精準的自動流程。`;
+  else nCheng += `把原本需要人工反覆處理的工作，變得即時而精準。`;
+
+  let nZhuan = `在實際應用中，`;
+  if (outputs.length) nZhuan += `系統會即時產出${join(outputs,3)}，`;
+  nZhuan += `${audPhrase}。`;
+  if (appsDistinct.length) nZhuan += `不論是${appsDistinct.slice(0,2).join('、')}等情境都能支援，`;
+  nZhuan += `決策時間從數小時縮短為數秒，使用者只要專注在判斷與行動。`;
+
+  let nHe = `導入之後，${join(benefits,3)}。` +
+            `「${central}」不只是一次技術升級，更為${dom}帶來新的可能。` +
+            `讓我們一起，用科技解決真實世界裡的問題。`;
+
+  // ---- 英文 AI 影片提示語(乾淨英文 + 內容導向) ----
+  const enSet = enDomain(dom);
+  const enProb = enList(problems,2) || 'a slow, costly manual process';
+  const enTech = enList(techs,4) || 'AI, IoT and data analytics';
+  const enOut  = enList(outputs,3);
+  const enBen  = enList(benefits,3) || 'major efficiency gains';
+  const pj = `the AI system "${central}"`;
+  const aiQi = `Cinematic documentary opening in ${enSet}. Convey the real-world problem of ${enProb}: a worker struggling with a slow, manual workflow, visible frustration and wasted time. Golden-hour light, shallow depth of field, slow push-in. 16:9, 4K, photoreal.`;
+  const aiCheng = `Sleek futuristic visualization of ${pj}, integrating ${enTech}. Holographic data dashboard, data flowing from sensors through an automated processing pipeline, glowing particles, blue-and-purple neon, clean modern UI overlay, smooth camera orbit. 16:9, 4K.`;
+  const aiZhuan = `A real user in ${enSet} operating the system on a tablet and a large screen. The interface shows ${enOut || 'instant results and clear feedback'}; friendly UI animations and immediate response. Warm natural lighting, over-the-shoulder shot plus UI close-ups, satisfied expression. 16:9, 4K.`;
+  const aiHe = `Inspiring closing montage. Animated statistics highlight the impact: ${enBen}. Quick success vignettes, then a clean logo reveal for ${pj} with a QR code on a bright gradient background. Uplifting, triumphant finale. 16:9, 4K.`;
+
+  const mk = (name,title,start,end,narration,visual,aiPrompt,zhRef) => ({name,title,start,end,narration,visual,aiPrompt,zhRef});
   return [
-    {
-      name: '起', title: '問題鉤子',
-      start: fmt(t0), end: fmt(t1),
-      narration: `每當面對${problem.split(/[、,。\n]/)[0]},我們花費的時間遠超想像。如果有方法能在數秒內解決,你願意了解嗎?`,
-      visual: '畫面:傳統流程實況 → 時間流逝特寫 → 問題情境呈現',
-      aiPrompt: `Documentary opening shot of ${config.領域} field, slow zoom in to a frustrated worker dealing with traditional methods, golden hour lighting, cinematic 4K`
-    },
-    {
-      name: '承', title: '技術亮點',
-      start: fmt(t1), end: fmt(t2),
-      narration: `我們的「${central}」整合${tech.split(/[、,。\n]/).slice(0,2).join('、')},打造前所未有的解決方案,讓資料說話、讓流程自動化。`,
-      visual: '畫面:系統架構動畫 → 儀表板數據流動 → 技術核心展示',
-      aiPrompt: `Futuristic tech visualization showing data flowing through ${tech.split(/[、,。\n]/)[0]}, holographic dashboard, particles, blue and purple neon glow, modern UI overlay`
-    },
-    {
-      name: '轉', title: '應用場景',
-      start: fmt(t2), end: fmt(t3),
-      narration: `實際應用上,使用者${config.受眾.includes('老師') ? '在課堂上即時看到結果' : '在現場輕鬆操作'},決策時間從數小時縮短為數秒,做出更明智的選擇。`,
-      visual: '畫面:使用者操作介面 → 即時回饋 → 成功反應',
-      aiPrompt: `Real user interacting with mobile/tablet interface in their work environment, friendly UI animations, immediate AI responses, warm natural lighting, joyful expression`
-    },
-    {
-      name: '合', title: '效益總結',
-      start: fmt(t3), end: fmt(t4),
-      narration: `${benefit.split(/[、,。\n]/).slice(0,2).join(',')}。這不只是科技進步,更是改變未來的關鍵一步。`,
-      visual: '畫面:統計數據跳動 → 成功畫面 → 品牌標誌 + QR Code',
-      aiPrompt: `Inspiring closing shot with statistics animations showing key metrics, success montage, brand logo reveal with QR code, uplifting cinematic finale`
-    }
+    mk('起','問題鉤子',fmt(t0),fmt(t1),nQi,
+       `畫面:${dom}現場實況 → 「${problems[0]}」痛點特寫 → 時間與成本流逝`,
+       aiQi, `問題:${join(problems,3)}`),
+    mk('承','技術亮點',fmt(t1),fmt(t2),nCheng,
+       `畫面:「${central}」系統架構動畫 → ${join(techs,3)} 運作 → 資料流動儀表板${funcs.length?` → 程式(${funcs.join('、')})`:''}`,
+       aiCheng, `核心:${central}；技術:${join(techs,4)}${process.length?`；流程:${join(process,3)}`:''}${funcs.length?`；程式:${funcs.join('、')}`:''}`),
+    mk('轉','應用場景',fmt(t2),fmt(t3),nZhuan,
+       `畫面:${config.受眾}操作介面 → ${outputs.length?join(outputs,3):'即時回饋'} → 成功反應`,
+       aiZhuan, `${outputs.length?`輸出:${join(outputs,3)}`:''}${appsDistinct.length?`${outputs.length?'；':''}應用:${appsDistinct.slice(0,2).join('、')}`:''}`),
+    mk('合','效益總結',fmt(t3),fmt(t4),nHe,
+       `畫面:「${join(benefits,2)}」數據跳動 → 成功畫面 → 「${central}」標誌 + QR Code`,
+       aiHe, `效益:${join(benefits,3)}`)
   ];
 }
 
@@ -4885,6 +4994,34 @@ function buildScriptMd(config, acts, isAI) {
   md += `## 📋 製作設定\n\n`;
   md += `| 項目 | 內容 |\n|---|---|\n`;
   md += `| 領域 | ${config.領域} |\n| 時長 | ${config.時長} |\n| 風格 | ${config.風格} |\n| 受眾 | ${config.受眾} |\n| 配音 | ${config.配音} |\n\n`;
+    const S = extractSource(config);
+  md += `## 📥 素材重點摘錄(取自你的上傳/輸入,為本腳本最優先依據)\n\n`;
+  if (config.心智圖) {
+    md += `**心智圖**\n`;
+    md += `- 中心主題:${S.central}\n`;
+    if (S.problems.length) md += `- 問題:${S.problems.slice(0,3).join('、')}\n`;
+    if (S.techs.length)    md += `- 技術:${S.techs.slice(0,4).join('、')}\n`;
+    if (S.benefits.length) md += `- 效益:${S.benefits.slice(0,3).join('、')}\n`;
+    md += `\n`;
+  }
+  if (config.IPO架構 && (S.inputs.length || S.process.length || S.outputs.length)) {
+    md += `**IPO 架構**\n`;
+    if (S.inputs.length)  md += `- 輸入:${S.inputs.slice(0,4).join('、')}\n`;
+    if (S.process.length) md += `- 處理:${S.process.slice(0,4).join('、')}\n`;
+    if (S.outputs.length) md += `- 輸出:${S.outputs.slice(0,4).join('、')}\n`;
+    md += `\n`;
+  }
+  if (config.程式碼 && (S.code.funcs.length || S.code.ops.length)) {
+    md += `**Python 程式**\n`;
+    if (S.code.funcs.length) md += `- 核心函式:${S.code.funcs.join('、')}\n`;
+    if (S.code.ops.length)   md += `- 核心運算:${S.code.ops.join('、')}\n`;
+    md += `\n`;
+  }
+  if (config.簡報投影片 && S.slides.length) {
+    md += `**簡報重點**\n`;
+    S.slides.slice(0,6).forEach(function(x){ md += `- ${x}\n`; });
+    md += `\n`;
+  }
   md += `## 🎬 起承轉合四幕\n\n`;
   for (const a of acts) {
     md += `### 【${a.name}】${a.title} · ${a.start}–${a.end}\n\n`;
@@ -4895,17 +5032,26 @@ function buildScriptMd(config, acts, isAI) {
   return md;
 }
 function buildNarrationTxt(config, acts) {
-  let t = `${config.領域} - 旁白逐字稿\n${'='.repeat(40)}\n配音平台:${config.配音}\n總長:${config.時長}\n\n`;
+  const cc = a => (a.narration||'').replace(/\s/g,'').length;
+  const total = acts.reduce((n,a)=>n+cc(a),0);
+  let t = `${config.領域} - 旁白逐字稿\n${'='.repeat(40)}\n配音平台:${config.配音}　總長:${config.時長}\n本稿依你提供的素材(心智圖 / IPO / Python / 簡報)生成 · 全文約 ${total} 字\n${'='.repeat(40)}\n\n`;
   for (const a of acts) {
-    t += `[${a.name}] ${a.title} (${a.start}–${a.end})\n${a.narration}\n\n`;
+    t += `[${a.name}] ${a.title} (${a.start}–${a.end}) · 約 ${cc(a)} 字\n${a.narration}\n\n`;
   }
+  t += `${'-'.repeat(40)}\n配音小提醒:語速約 1.05–1.10 倍最自然;可逐段貼到 Hailuo Audio / TTSMaker 生成 MP3。\n`;
   return t;
 }
 function buildPromptTxt(config, acts) {
-  let t = `AI Video Generation Prompts - ${config.領域}\n${'='.repeat(40)}\nUsage: Copy each prompt to Hailuo / Kling / Runway / Sora / Pika\n\n`;
+  const S = (typeof extractSource==='function') ? extractSource(config) : {central:config.領域};
+  let t = `AI Video Generation Prompts \u2014 ${config.領域}\n${'='.repeat(44)}\n`;
+  t += `Project: "${S.central||config.領域}"  \u00b7  Domain: ${config.領域}  \u00b7  Style: ${config.風格}\n`;
+  t += `Usage: paste each scene prompt into Hailuo / Kling / Runway / Sora / Pika.\n`;
+  t += `Global look: keep characters & color grade consistent across scenes, 16:9, 4K, no on-screen text.\n${'='.repeat(44)}\n\n`;
   for (let i = 0; i < acts.length; i++) {
     const a = acts[i];
-    t += `## Scene ${i+1}: ${a.name} - ${a.title} (${a.start}–${a.end})\n${a.aiPrompt}\n\n`;
+    t += `## Scene ${i+1} \u2014 ${a.name} / ${a.title}  (${a.start}\u2013${a.end})\n${a.aiPrompt}\n`;
+    if (a.zhRef) t += `[\u53c3\u8003\u91cd\u9ede] ${a.zhRef}\n`;
+    t += `\n`;
   }
   return t;
 }
